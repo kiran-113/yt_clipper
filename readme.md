@@ -34,7 +34,7 @@ It downloads a YouTube video, extracts the transcript, uses **Google Gemini** to
 
 ```
 
-project-root/
+yt_clipper/
 ├── clips/
 │   ├── clip_title_1.mp4
 │   ├── clip_title_2.mp4
