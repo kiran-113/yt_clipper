@@ -27,6 +27,29 @@ if not API_KEY:
 genai.configure(api_key=API_KEY)
 model = genai.GenerativeModel("gemini-2.5-flash")
 
+DEFAULT_OUTPUT_DIR = "clips"
+
+# ------------------ OUTPUT DIRECTORY ------------------
+def get_output_directory():
+    user_path = input(
+        f"Enter directory to save clips (press Enter for '{DEFAULT_OUTPUT_DIR}'): "
+    ).strip()
+
+    if not user_path:
+        print(f"📁 Using default directory: {DEFAULT_OUTPUT_DIR}")
+        return DEFAULT_OUTPUT_DIR
+
+    if not os.path.exists(user_path):
+        try:
+            os.makedirs(user_path, exist_ok=True)
+            print(f"📁 Created directory: {user_path}")
+            return user_path
+        except Exception:
+            print(f"⚠️ Invalid path. Using default: {DEFAULT_OUTPUT_DIR}")
+            return DEFAULT_OUTPUT_DIR
+
+    return user_path
+
 # ------------------ DOWNLOAD VIDEO ------------------
 def download_youtube(video_url, video_id):
     output_path = f"{video_id}.mp4"
@@ -47,8 +70,7 @@ def download_youtube(video_url, video_id):
 # ------------------ TRANSCRIPT ------------------
 def get_transcript(video_id):
     print("📜 Fetching transcript...")
-    ytt_api = YouTubeTranscriptApi()
-    return ytt_api.fetch(video_id)
+    return YouTubeTranscriptApi().fetch(video_id)
 
 def transcript_to_text(transcript):
     return " ".join([entry.text for entry in transcript])
@@ -80,25 +102,18 @@ Rules:
 Transcript:
 {text}
 """
-
     print("🤖 Sending transcript to Gemini...")
-    response = model.generate_content(prompt)
-    raw = response.text.strip()
+    raw = model.generate_content(prompt).text.strip()
 
-    if not raw:
-        raise ValueError("❌ Gemini returned empty response")
+    match = re.search(r'\[.*\]', raw, re.DOTALL)
+    if not match:
+        raise ValueError("❌ Invalid Gemini output")
 
-    json_match = re.search(r'\[.*\]', raw, re.DOTALL)
-    if not json_match:
-        print("❌ No JSON found in Gemini output:")
-        print(raw)
-        raise ValueError("Invalid Gemini output")
-
-    clips = json.loads(json_match.group())
+    clips = json.loads(match.group())
     print(f"✅ Gemini returned {len(clips)} clips")
     return clips
 
-# ------------------ CUT VIDEO (GPU ENABLED) ------------------
+# ------------------ CUT VIDEO (GPU ENABLED + COLOR FIX) ------------------
 def cut_clip(video_file, start, end, output_file):
     print(f"✂️ Cutting clip: {output_file}")
 
@@ -106,21 +121,26 @@ def cut_clip(video_file, start, end, output_file):
         clip = video.subclip(start, end)
         w, h = clip.size
 
-        # Crop to 9:16
         target_w = h * 9 / 16
         if target_w < w:
             x1 = (w - target_w) / 2
-            x2 = x1 + target_w
-            clip = clip.crop(x1=x1, x2=x2)
+            clip = clip.crop(x1=x1, x2=x1 + target_w)
 
         clip = clip.resize((1080, 1920))
 
         clip.write_videofile(
             output_file,
-            codec="h264_nvenc",     # GPU acceleration
+            codec="h264_nvenc",
             audio_codec="aac",
             preset="fast",
-            ffmpeg_params=["-rc", "vbr", "-cq", "19"],
+            ffmpeg_params=[
+                "-pix_fmt", "yuv420p",
+                "-colorspace", "bt709",
+                "-color_primaries", "bt709",
+                "-color_trc", "bt709",
+                "-rc", "vbr",
+                "-cq", "19"
+            ],
             threads=0
         )
 
@@ -140,7 +160,7 @@ def cleanup_files(*paths):
             print(f"⚠️ Cleanup failed for {path}: {e}")
 
 # ------------------ MAIN WORKFLOW ------------------
-def process(video_url):
+def process(video_url, output_dir):
     video_id = video_url.replace("https://youtu.be/", "").split("?")[0]
 
     video_path = download_youtube(video_url, video_id)
@@ -148,9 +168,8 @@ def process(video_url):
     text = transcript_to_text(transcript)
     clips = get_engaging_clips(text)
 
-    os.makedirs("clips", exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
 
-    # Safely read duration (prevents WinError 32)
     with VideoFileClip(video_path) as probe:
         video_duration = probe.duration
 
@@ -161,7 +180,9 @@ def process(video_url):
             end = min(start + 60, video_duration)
 
         safe_title = re.sub(r"[^\w\s-]", "", clip["title"]).strip().replace(" ", "_")
-        filename = f"clips/{safe_title or f'clip_{i+1}'}.mp4"
+        filename = os.path.join(
+            output_dir, f"{safe_title or f'clip_{i+1}'}.mp4"
+        )
 
         cut_clip(video_path, start, end, filename)
 
@@ -173,7 +194,5 @@ def process(video_url):
 # ------------------ RUN SCRIPT ------------------
 if __name__ == "__main__":
     url = input("Paste YouTube video URL: ")
-    clips = process(url)
-
-    # print("\n📌 FINAL CLIP DATA:")
-    # print(json.dumps(clips, indent=2))
+    output_dir = get_output_directory()
+    process(url, output_dir)
